@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-#/usr/bin/python2
+# /usr/bin/python2
 '''
 June 2017 by kyubyong park. 
 kbpark.linguist@gmail.com.
@@ -8,9 +8,11 @@ https://www.github.com/kyubyong/transformer
 
 from __future__ import print_function
 import tensorflow as tf
+import numpy as np
 
-def normalize(inputs, 
-              epsilon = 1e-8,
+
+def normalize(inputs,
+              epsilon=1e-8,
               scope="ln",
               reuse=None):
     '''Applies layer normalization.
@@ -29,21 +31,22 @@ def normalize(inputs,
     with tf.variable_scope(scope, reuse=reuse):
         inputs_shape = inputs.get_shape()
         params_shape = inputs_shape[-1:]
-    
+
         mean, variance = tf.nn.moments(inputs, [-1], keep_dims=True)
-        beta= tf.Variable(tf.zeros(params_shape))
+        beta = tf.Variable(tf.zeros(params_shape))
         gamma = tf.Variable(tf.ones(params_shape))
-        normalized = (inputs - mean) / ( (variance + epsilon) ** (.5) )
+        normalized = (inputs - mean) / ((variance + epsilon) ** (.5))
         outputs = gamma * normalized + beta
-        
+
     return outputs
 
-def embedding(inputs, 
-              vocab_size, 
-              num_units, 
-              zero_pad=True, 
+
+def embedding(inputs,
+              vocab_size,
+              num_units,
+              zero_pad=True,
               scale=True,
-              scope="embedding", 
+              scope="embedding",
               reuse=None):
     '''Embeds a given tensor.
 
@@ -110,12 +113,12 @@ def embedding(inputs,
             lookup_table = tf.concat((tf.zeros(shape=[1, num_units]),
                                       lookup_table[1:, :]), 0)
         outputs = tf.nn.embedding_lookup(lookup_table, inputs)
-        
+
         if scale:
-            outputs = outputs * (num_units ** 0.5) 
-            
+            outputs = outputs * (num_units ** 0.5)
+
     return outputs
-    
+
 
 def positional_encoding(inputs,
                         num_units,
@@ -144,7 +147,7 @@ def positional_encoding(inputs,
 
         # First part of the PE function: sin and cos argument
         position_enc = np.array([
-            [pos / np.power(10000, 2.*i/num_units) for i in range(num_units)]
+            [pos / np.power(10000, 2. * i / num_units) for i in range(num_units)]
             for pos in range(T)])
 
         # Second part, apply the cosine to even columns and sin to odds.
@@ -160,20 +163,19 @@ def positional_encoding(inputs,
         outputs = tf.nn.embedding_lookup(lookup_table, position_ind)
 
         if scale:
-            outputs = outputs * num_units**0.5
+            outputs = outputs * num_units ** 0.5
 
         return outputs
 
 
-
-def multihead_attention(queries, 
-                        keys, 
-                        num_units=None, 
-                        num_heads=8, 
+def multihead_attention(queries,
+                        keys,
+                        num_units=None,
+                        num_heads=8,
                         dropout_rate=0,
                         is_training=True,
                         causality=False,
-                        scope="multihead_attention", 
+                        scope="multihead_attention",
                         reuse=None):
     '''Applies multihead attention.
     
@@ -196,70 +198,99 @@ def multihead_attention(queries,
         # Set the fall back option for num_units
         if num_units is None:
             num_units = queries.get_shape().as_list[-1]
-        
-        # Linear projections
-        Q = tf.layers.dense(queries, num_units, activation=tf.nn.relu) # (N, T_q, C)
-        K = tf.layers.dense(keys, num_units, activation=tf.nn.relu) # (N, T_k, C)
-        V = tf.layers.dense(keys, num_units, activation=tf.nn.relu) # (N, T_k, C)
-        
-        # Split and concat
-        Q_ = tf.concat(tf.split(Q, num_heads, axis=2), axis=0) # (h*N, T_q, C/h) 
-        K_ = tf.concat(tf.split(K, num_heads, axis=2), axis=0) # (h*N, T_k, C/h) 
-        V_ = tf.concat(tf.split(V, num_heads, axis=2), axis=0) # (h*N, T_k, C/h) 
 
-        # Multiplication
-        outputs = tf.matmul(Q_, tf.transpose(K_, [0, 2, 1])) # (h*N, T_q, T_k)
-        
+        outputs = None
+        for head in range(num_heads):
+            Q = tf.layers.dense(queries, num_units, activation=tf.nn.relu)  # (N, T_q, C)
+            K = tf.layers.dense(keys, num_units, activation=tf.nn.relu)  # (N, T_k, C)
+            V = tf.layers.dense(keys, num_units, activation=tf.nn.relu)  # (N, T_k, C)
+
+            output = tf.matmul(Q, tf.transpose(K, [0, 2, 1]))
+            output = output / (K.get_shape().as_list()[-1] ** 0.5)
+            output = tf.matmul(output, V)
+            if outputs == None:
+                outputs = output
+            outputs = tf.concat((outputs, output), -1)
+
+        outputs = tf.layers.dense(outputs, 512, activation=tf.nn.relu)  # (N, T_k, C)
+
+        key_masks = tf.sign(tf.abs(tf.reduce_sum(keys, axis=-1)))  # (N, T_k)
+        key_masks = tf.tile(tf.expand_dims(key_masks, 2), [1, 1, num_units])
+        paddings = tf.ones_like(outputs) * (-2 ** 32 + 1)
+        outputs = tf.where(tf.equal(key_masks, 0), paddings, outputs)
+
+        query_masks = tf.sign(tf.abs(tf.reduce_sum(queries, axis=-1)))  # (N, T_q)
+        query_masks = tf.tile(tf.expand_dims(query_masks, 2), [1, 1, num_units])
+        outputs *= query_masks  # broadcasting. (N, T_q, C)
+
+        outputs = tf.layers.dropout(outputs, rate=dropout_rate, training=tf.convert_to_tensor(is_training))
+
+        # # Linear projections
+        # Q = tf.layers.dense(queries, num_units, activation=tf.nn.relu)  # (N, T_q, C)
+        # K = tf.layers.dense(keys, num_units, activation=tf.nn.relu)  # (N, T_k, C)
+        # V = tf.layers.dense(keys, num_units, activation=tf.nn.relu)  # (N, T_k, C)
+        #
+        # # Split and concat
+        # Q_ = tf.concat(tf.split(Q, num_heads, axis=2), axis=0)  # (h*N, T_q, C/h)
+        # K_ = tf.concat(tf.split(K, num_heads, axis=2), axis=0)  # (h*N, T_k, C/h)
+        # V_ = tf.concat(tf.split(V, num_heads, axis=2), axis=0)  # (h*N, T_k, C/h)
+        #
+        # # Multiplication
+        # outputs = tf.matmul(Q_, tf.transpose(K_, [0, 2, 1]))  # (h*N, T_q, T_k)
+
         # Scale
-        outputs = outputs / (K_.get_shape().as_list()[-1] ** 0.5)
-        
+        # outputs = outputs / (K_.get_shape().as_list()[-1] ** 0.5)
+
         # Key Masking
-        key_masks = tf.sign(tf.abs(tf.reduce_sum(keys, axis=-1))) # (N, T_k)
-        key_masks = tf.tile(key_masks, [num_heads, 1]) # (h*N, T_k)
-        key_masks = tf.tile(tf.expand_dims(key_masks, 1), [1, tf.shape(queries)[1], 1]) # (h*N, T_q, T_k)
-        
-        paddings = tf.ones_like(outputs)*(-2**32+1)
-        outputs = tf.where(tf.equal(key_masks, 0), paddings, outputs) # (h*N, T_q, T_k)
-  
+        # key_masks = tf.sign(tf.abs(tf.reduce_sum(keys, axis=-1)))  # (N, T_k)
+        # key_masks = tf.tile(key_masks, [num_heads, 1])  # (h*N, T_k)
+        # key_masks = tf.tile(tf.expand_dims(key_masks, 1), [1, tf.shape(queries)[1], 1])  # (h*N, T_q, T_k)
+        # key_masks = tf.tile(tf.expand_dims(key_masks, 2), [1, 1, num_units])
+        # paddings = tf.ones_like(outputs) * (-2 ** 32 + 1)
+        # outputs = tf.where(tf.equal(key_masks, 0), paddings, outputs)  # (h*N, T_q, T_k)
+
         # Causality = Future blinding
         if causality:
-            diag_vals = tf.ones_like(outputs[0, :, :]) # (T_q, T_k)
+            diag_vals = tf.ones_like(outputs[0, :, :])  # (T_q, T_k)
             # mask 把上三角的值全部设置为0
             tril = tf.linalg.LinearOperatorLowerTriangular(diag_vals).to_dense()  # (T_q, T_k)
-            masks = tf.tile(tf.expand_dims(tril, 0), [tf.shape(outputs)[0], 1, 1]) # (h*N, T_q, T_k)
-   
-            paddings = tf.ones_like(masks)*(-2**32+1)
-            outputs = tf.where(tf.equal(masks, 0), paddings, outputs) # (h*N, T_q, T_k)
-  
+            masks = tf.tile(tf.expand_dims(tril, 0), [tf.shape(outputs)[0], 1, 1])  # (h*N, T_q, T_k)
+
+            paddings = tf.ones_like(masks) * (-2 ** 32 + 1)
+            outputs = tf.where(tf.equal(masks, 0), paddings, outputs)  # (h*N, T_q, T_k)
+
         # Activation
-        outputs = tf.nn.softmax(outputs) # (h*N, T_q, T_k)
-         
+        outputs = tf.nn.softmax(outputs)  # (h*N, T_q, T_k)
+
         # Query Masking
-        query_masks = tf.sign(tf.abs(tf.reduce_sum(queries, axis=-1))) # (N, T_q)
-        query_masks = tf.tile(query_masks, [num_heads, 1]) # (h*N, T_q)
-        query_masks = tf.tile(tf.expand_dims(query_masks, -1), [1, 1, tf.shape(keys)[1]]) # (h*N, T_q, T_k)
-        outputs *= query_masks # broadcasting. (N, T_q, C)
-          
+        query_masks = tf.sign(tf.abs(tf.reduce_sum(queries, axis=-1)))  # (N, T_q)
+        # query_masks = tf.tile(query_masks, [num_heads, 1])  # (h*N, T_q)
+        # query_masks = tf.tile(tf.expand_dims(query_masks, -1), [1, 1, tf.shape(keys)[1]])  # (h*N, T_q, T_k)
+        query_masks = tf.tile(tf.expand_dims(query_masks, 2), [1, 1, num_units])
+        outputs *= query_masks  # broadcasting. (N, T_q, C)
+
         # Dropouts
         outputs = tf.layers.dropout(outputs, rate=dropout_rate, training=tf.convert_to_tensor(is_training))
-               
+
         # Weighted sum
-        outputs = tf.matmul(outputs, V_) # ( h*N, T_q, C/h)
-        
+        # outputs = tf.matmul(outputs, V_)  # ( h*N, T_q, C/h)
+        # outputs = tf.matmul(outputs, V_)  # ( h*N, T_q, C/h)
+
         # Restore shape
-        outputs = tf.concat(tf.split(outputs, num_heads, axis=0), axis=2 ) # (N, T_q, C)
-              
+        outputs = tf.concat(tf.split(outputs, num_heads, axis=0), axis=2)  # (N, T_q, C)
+
         # Residual connection
         outputs += queries
-              
+
         # Normalize
-        outputs = normalize(outputs) # (N, T_q, C)
- 
+        outputs = normalize(outputs)  # (N, T_q, C)
+
     return outputs
 
-def feedforward(inputs, 
+
+def feedforward(inputs,
                 num_units=[2048, 512],
-                scope="multihead_attention", 
+                scope="multihead_attention",
                 reuse=None):
     '''Point-wise feed forward net.
     
@@ -278,19 +309,20 @@ def feedforward(inputs,
         params = {"inputs": inputs, "filters": num_units[0], "kernel_size": 1,
                   "activation": tf.nn.relu, "use_bias": True}
         outputs = tf.layers.conv1d(**params)
-        
+
         # Readout layer
         params = {"inputs": outputs, "filters": num_units[1], "kernel_size": 1,
                   "activation": None, "use_bias": True}
         outputs = tf.layers.conv1d(**params)
-        
+
         # Residual connection
         outputs += inputs
-        
+
         # Normalize
         outputs = normalize(outputs)
-    
+
     return outputs
+
 
 def label_smoothing(inputs, epsilon=0.1):
     '''Applies label smoothing. See https://arxiv.org/abs/1512.00567.
@@ -326,9 +358,5 @@ def label_smoothing(inputs, epsilon=0.1):
         [ 0.03333334,  0.93333334,  0.03333334]]], dtype=float32)]   
     ```    
     '''
-    K = inputs.get_shape().as_list()[-1] # number of channels
-    return ((1-epsilon) * inputs) + (epsilon / K)
-    
-    
-
-            
+    K = inputs.get_shape().as_list()[-1]  # number of channels
+    return ((1 - epsilon) * inputs) + (epsilon / K)
