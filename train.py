@@ -69,7 +69,7 @@ class Graph:
                         ### Multihead Attention
                         self.enc = multihead_attention(queries=self.enc,
                                                        keys=self.enc,
-                                                       num_units=hp.hidden_units,
+                                                       num_units=hp.head_size,
                                                        num_heads=hp.num_heads,
                                                        dropout_rate=hp.dropout_rate,
                                                        is_training=is_training,
@@ -115,7 +115,7 @@ class Graph:
                         ## Multihead Attention ( self-attention)
                         self.dec = multihead_attention(queries=self.dec,
                                                        keys=self.dec,
-                                                       num_units=hp.hidden_units,
+                                                       num_units=hp.head_size,
                                                        num_heads=hp.num_heads,
                                                        dropout_rate=hp.dropout_rate,
                                                        is_training=is_training,
@@ -125,7 +125,7 @@ class Graph:
                         ## Multihead Attention ( vanilla attention)
                         self.dec = multihead_attention(queries=self.dec,
                                                        keys=self.enc,
-                                                       num_units=hp.hidden_units,
+                                                       num_units=hp.head_size,
                                                        num_heads=hp.num_heads,
                                                        dropout_rate=hp.dropout_rate,
                                                        is_training=is_training,

@@ -199,57 +199,11 @@ def multihead_attention(queries,
         if num_units is None:
             num_units = queries.get_shape().as_list[-1]
 
-        outputs = None
-        for head in range(num_heads):
-            Q = tf.layers.dense(queries, num_units, activation=tf.nn.relu)  # (N, T_q, C)
-            K = tf.layers.dense(keys, num_units, activation=tf.nn.relu)  # (N, T_k, C)
-            V = tf.layers.dense(keys, num_units, activation=tf.nn.relu)  # (N, T_k, C)
+        padding_masks = tf.sign(tf.abs(tf.reduce_sum(keys, axis=-1)))  # (N, T_k)
+        padding_masks = tf.tile(tf.expand_dims(padding_masks, 2), [1, 1, 512])
+        paddings = tf.ones_like(keys) * (-2 ** 32 + 1)
+        outputs = tf.where(tf.equal(padding_masks, 0), paddings, keys)
 
-            output = tf.matmul(Q, tf.transpose(K, [0, 2, 1]))
-            output = output / (K.get_shape().as_list()[-1] ** 0.5)
-            output = tf.matmul(output, V)
-            if outputs == None:
-                outputs = output
-            outputs = tf.concat((outputs, output), -1)
-
-        outputs = tf.layers.dense(outputs, 512, activation=tf.nn.relu)  # (N, T_k, C)
-
-        key_masks = tf.sign(tf.abs(tf.reduce_sum(keys, axis=-1)))  # (N, T_k)
-        key_masks = tf.tile(tf.expand_dims(key_masks, 2), [1, 1, num_units])
-        paddings = tf.ones_like(outputs) * (-2 ** 32 + 1)
-        outputs = tf.where(tf.equal(key_masks, 0), paddings, outputs)
-
-        query_masks = tf.sign(tf.abs(tf.reduce_sum(queries, axis=-1)))  # (N, T_q)
-        query_masks = tf.tile(tf.expand_dims(query_masks, 2), [1, 1, num_units])
-        outputs *= query_masks  # broadcasting. (N, T_q, C)
-
-        outputs = tf.layers.dropout(outputs, rate=dropout_rate, training=tf.convert_to_tensor(is_training))
-
-        # # Linear projections
-        # Q = tf.layers.dense(queries, num_units, activation=tf.nn.relu)  # (N, T_q, C)
-        # K = tf.layers.dense(keys, num_units, activation=tf.nn.relu)  # (N, T_k, C)
-        # V = tf.layers.dense(keys, num_units, activation=tf.nn.relu)  # (N, T_k, C)
-        #
-        # # Split and concat
-        # Q_ = tf.concat(tf.split(Q, num_heads, axis=2), axis=0)  # (h*N, T_q, C/h)
-        # K_ = tf.concat(tf.split(K, num_heads, axis=2), axis=0)  # (h*N, T_k, C/h)
-        # V_ = tf.concat(tf.split(V, num_heads, axis=2), axis=0)  # (h*N, T_k, C/h)
-        #
-        # # Multiplication
-        # outputs = tf.matmul(Q_, tf.transpose(K_, [0, 2, 1]))  # (h*N, T_q, T_k)
-
-        # Scale
-        # outputs = outputs / (K_.get_shape().as_list()[-1] ** 0.5)
-
-        # Key Masking
-        # key_masks = tf.sign(tf.abs(tf.reduce_sum(keys, axis=-1)))  # (N, T_k)
-        # key_masks = tf.tile(key_masks, [num_heads, 1])  # (h*N, T_k)
-        # key_masks = tf.tile(tf.expand_dims(key_masks, 1), [1, tf.shape(queries)[1], 1])  # (h*N, T_q, T_k)
-        # key_masks = tf.tile(tf.expand_dims(key_masks, 2), [1, 1, num_units])
-        # paddings = tf.ones_like(outputs) * (-2 ** 32 + 1)
-        # outputs = tf.where(tf.equal(key_masks, 0), paddings, outputs)  # (h*N, T_q, T_k)
-
-        # Causality = Future blinding
         if causality:
             diag_vals = tf.ones_like(outputs[0, :, :])  # (T_q, T_k)
             # mask 把上三角的值全部设置为0
@@ -259,25 +213,23 @@ def multihead_attention(queries,
             paddings = tf.ones_like(masks) * (-2 ** 32 + 1)
             outputs = tf.where(tf.equal(masks, 0), paddings, outputs)  # (h*N, T_q, T_k)
 
-        # Activation
-        outputs = tf.nn.softmax(outputs)  # (h*N, T_q, T_k)
+        multi_outputs = None
+        for head in range(num_heads):
+            Q = tf.layers.dense(outputs, num_units, activation=tf.nn.relu)  # (N, T_q, C)
+            K = tf.layers.dense(outputs, num_units, activation=tf.nn.relu)  # (N, T_k, C)
+            V = tf.layers.dense(outputs, num_units, activation=tf.nn.relu)  # (N, T_k, C)
 
-        # Query Masking
-        query_masks = tf.sign(tf.abs(tf.reduce_sum(queries, axis=-1)))  # (N, T_q)
-        # query_masks = tf.tile(query_masks, [num_heads, 1])  # (h*N, T_q)
-        # query_masks = tf.tile(tf.expand_dims(query_masks, -1), [1, 1, tf.shape(keys)[1]])  # (h*N, T_q, T_k)
-        query_masks = tf.tile(tf.expand_dims(query_masks, 2), [1, 1, num_units])
-        outputs *= query_masks  # broadcasting. (N, T_q, C)
+            output = tf.matmul(Q, tf.transpose(K, [0, 2, 1]))
+            output = output / (K.get_shape().as_list()[-1] ** 0.5)
+            output = tf.nn.softmax(output)  # (h*N, T_q, T_k)
+            output = tf.matmul(output, V)
+            if multi_outputs is None:
+                multi_outputs = output
+            else:
+                multi_outputs = tf.concat((multi_outputs, output), -1)
 
-        # Dropouts
+        outputs = tf.layers.dense(multi_outputs, 512, activation=tf.nn.relu)  # (N, T_k, C)
         outputs = tf.layers.dropout(outputs, rate=dropout_rate, training=tf.convert_to_tensor(is_training))
-
-        # Weighted sum
-        # outputs = tf.matmul(outputs, V_)  # ( h*N, T_q, C/h)
-        # outputs = tf.matmul(outputs, V_)  # ( h*N, T_q, C/h)
-
-        # Restore shape
-        outputs = tf.concat(tf.split(outputs, num_heads, axis=0), axis=2)  # (N, T_q, C)
 
         # Residual connection
         outputs += queries

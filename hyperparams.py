@@ -26,6 +26,7 @@ class Hyperparams:
     num_blocks = 6 # number of encoder/decoder blocks
     num_epochs = 20
     num_heads = 8
+    head_size = 64
     dropout_rate = 0.1
     sinusoid = False # If True, use sinusoid. If false, positional embedding.
     
